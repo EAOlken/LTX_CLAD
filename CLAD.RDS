@@ -1,0 +1,128 @@
+#library
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(celldex)
+library(SeuratExtend)
+library(SeuratWrappers)
+library(patchwork)
+library(monocle3)
+library(biomaRt)
+library(EnhancedVolcano)
+library(ggplot2)
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        prct = unlist(lapply(genes,calc_helper, object=object))
+        result = data.frame(Markers = genes, Cell_proportion = prct)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes=genes)
+        for(i in 1:length(factors)){
+        results[[i]]$Feature = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper <- function(object,genes){
+    counts = object[['RNA']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    }else{return(NA)}
+}
+
+matrix_to_expression_df<- function(x, obj){
+        df<- x %>%
+                as.matrix() %>% 
+                as.data.frame() %>%
+                tibble::rownames_to_column(var= "gene") %>%
+                tidyr::pivot_longer(cols = -1, names_to = "cell", values_to = "expression") %>%
+                tidyr::pivot_wider(names_from = "gene", values_from = expression) %>%
+                left_join(obj@meta.data %>% 
+                                  tibble::rownames_to_column(var = "cell"))
+        return(df)
+}
+
+
+get_expression_data<- function(obj, assay = "RNA", slot = "data", 
+                               genes = NULL, cells = NULL){
+        if (is.null(genes) & !is.null(cells)){
+                df<- GetAssayData(obj, assay = assay, slot = slot)[, cells, drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else if (!is.null(genes) & is.null(cells)){
+                df <- GetAssayData(obj, assay = assay, slot = slot)[genes, , drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else if (is.null(genes & is.null(cells))){
+                df <- GetAssayData(obj, assay = assay, slot = slot)[, , drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else {
+                df<- GetAssayData(obj, assay = assay, slot = slot)[genes, cells, drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        }
+        return(df)
+}
+```
+
+##Read Object
+```{r}
+# Read 
+LTx_Seurat <- readRDS("donor_stable_bos_ras.rds")
+LTx_Seurat[["percent.mt"]] <- PercentageFeatureSet(LTx_Seurat, pattern = "^MT-")
+
+VlnPlot(LTx_Seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+LTx_Seurat <- subset(
+  LTx_Seurat,
+  subset = nFeature_RNA <= 10000 & percent.mt <= 10
+)
+```
+
+
+#Single Cell Clustering RES:0.4
+```{r}
+LTx_Seurat <- NormalizeData(LTx_Seurat)
+LTx_Seurat <- FindVariableFeatures(LTx_Seurat)
+LTx_Seurat <- ScaleData(LTx_Seurat)
+LTx_Seurat <- RunPCA(LTx_Seurat, npcs = 30, verbose = FALSE)
+
+LTx_Seurat <- IntegrateLayers(object = LTx_Seurat, method = HarmonyIntegration,
+                       orig.reduction = "pca", new.reduction = 'harmony', verbose = FALSE)
+
+LTx_Seurat <- readRDS("stablebosras_afterharmony.RDS")
+Idents(LTx_Seurat) <- LTx_Seurat$sample
+LTx_Seurat <-subset(LTx_Seurat, idents=c("233-17","93-32"), invert=TRUE)
+
+LTx_Seurat <- FindNeighbors(LTx_Seurat, reduction = "harmony", dims = 1:20)
+LTx_Seurat <- FindClusters(LTx_Seurat, resolution = 0.4, cluster.name = "harmony_clusters")
+LTx_Seurat  <- RunUMAP(LTx_Seurat, reduction = "harmony", dims = 1:20, reduction.name = "umap.harmony", n.neighbors = 20, min.dist=0.5)
+
+#DimPlot(LTx_Seurat, reduction = "umap.harmony")
+
+#outliers eliminated
+LTx_Seurat <- subset(LTx_Seurat, idents=11, invert=TRUE)
+LTx_Seurat <- subset(LTx_Seurat, idents=c(0,1,2,3,4,5,6,11,13,14,15,16,17))
+LTx_Seurat  <- RunUMAP(LTx_Seurat, reduction = "harmony", dims = 1:20, reduction.name = "umap.harmony", n.neighbors = 20)
+
+LTx_Seurat[["RNA"]] <- JoinLayers(LTx_Seurat[["RNA"]])
+LTx_Seurat.markers2 <- FindAllMarkers(LTx_Seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+LTx_Seurat.markers %>%
+  group_by(cluster) %>%
+  top_n(n = 3, wt = avg_log2FC) -> lungtop10
+DotPlot(LTx_Seurat, features = lungtop10$gene) + NoLegend() + FontSize(y.text=5)+ theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+LTx_Seurat <- RenameIdents(object = LTx_Seurat, "0"="Fibroblast", "1" = "ATI","2"="ATII","3" = "T Cells","4"  = "Endothelial","5"="Macrophages","6"="IM","11"= "Plasma","13" = "SMC","14" = "Basal Cells","15"="B Cells","16"="LEC","17"="Mast Cells")
+
+LTx_Seurat$CellType <- Idents(LTx_Seurat)
+
+```
